@@ -1,0 +1,32 @@
+groups:
+  - name: pdfforge-gateway
+    rules:
+      - alert: GatewayDown
+        expr: up{job="gateway"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "API gateway is down"
+
+      - alert: HighErrorRate
+        expr: |
+          sum(rate(http_requests_total{job="gateway",status=~"5.."}[5m]))
+            / sum(rate(http_requests_total{job="gateway"}[5m])) > 0.05
+        for: 5m
+        labels: { severity: high }
+        annotations:
+          summary: "5xx error rate > 5% over 5m"
+
+      - alert: HighLatencyP95
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job="gateway"}[5m])) by (le)) > 1.5
+        for: 5m
+        labels: { severity: high }
+        annotations:
+          summary: "p95 request latency > 1.5s over 5m"
+
+      - alert: RateLimitSpike
+        expr: sum(rate(http_requests_total{job="gateway",status="429"}[5m])) > 5
+        for: 5m
+        labels: { severity: medium }
+        annotations:
+          summary: "Sustained 429s — possible abuse or limits too low"

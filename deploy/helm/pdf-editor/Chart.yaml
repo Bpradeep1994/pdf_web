@@ -1,0 +1,8 @@
+apiVersion: v2
+name: pdf-editor
+description: AI-Powered PDF Editor SaaS — API gateway, microservices, workers, and frontend
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+maintainers:
+  - name: Platform Team

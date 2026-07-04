@@ -1,0 +1,36 @@
+# secrets — never commit
+.env
+.env.local
+.env.production
+.env.*.local
+*.pem
+*.key
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# node / next
+node_modules/
+.next/
+out/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+
+# caches / logs
+.pytest_cache/
+*.log
+
+# backups / dumps
+/backups/
+*.dump
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

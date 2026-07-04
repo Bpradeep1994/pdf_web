@@ -1,0 +1,300 @@
+version: "3.9"
+
+services:
+  # ──────────────────────────────────────────────
+  # Infrastructure
+  # ──────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pdfuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pdfpass}
+      POSTGRES_DB: ${POSTGRES_DB:-pdfeditor}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pdfuser}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redispass}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-pdfuser}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-pdfpass}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin123}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Self-hosted machine translation (English ⇄ Hindi/Telugu/… ) — no API keys.
+  # Models download to the volume on first start (a few minutes).
+  libretranslate:
+    image: libretranslate/libretranslate:latest
+    # models are pre-installed into lt_models (backend/scripts + docs/SELF_HOSTED.md);
+    # --update-models crashes on a fresh volume, so it is deliberately omitted
+    command: --host 0.0.0.0 --port 5000 --load-only en,hi,bn,ur,fr,de,es
+    volumes:
+      - lt_models:/home/libretranslate/.local
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────
+  # Backend Services
+  # ──────────────────────────────────────────────
+  gateway:
+    build:
+      context: ./backend
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - AUTH_SERVICE_URL=http://auth_service:8001
+      - PDF_SERVICE_URL=http://pdf_service:8002
+      - OCR_SERVICE_URL=http://ocr_service:8004
+      - CONVERSION_SERVICE_URL=http://conversion_service:8005
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redispass}@redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-supersecretkey}
+      # The editor renders every page + thumbnail as an image request, so a browsing
+      # session legitimately makes hundreds of requests/min — 100 was breaking page loads.
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-600}
+      - RATE_LIMIT_BYPASS_TOKEN=${RATE_LIMIT_BYPASS_TOKEN:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  auth_service:
+    build:
+      context: ./backend
+      dockerfile: auth_service/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-pdfuser}:${POSTGRES_PASSWORD:-pdfpass}@postgres:5432/${POSTGRES_DB:-pdfeditor}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redispass}@redis:6379/0
+      - SECRET_KEY=${SECRET_KEY:-supersecretkey}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
+      - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
+      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID}
+      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET}
+      - OAUTH_REDIRECT_BASE=${OAUTH_REDIRECT_BASE:-http://localhost:8000/api/v1/auth}
+      - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET:-}
+      - PAYPAL_WEBHOOK_ID=${PAYPAL_WEBHOOK_ID:-}
+      - PAYPAL_CLIENT_ID=${PAYPAL_CLIENT_ID:-}
+      - PAYPAL_CLIENT_SECRET=${PAYPAL_CLIENT_SECRET:-}
+      - STRIPE_PRICE_PRO=${STRIPE_PRICE_PRO}
+      - STRIPE_PRICE_BUSINESS=${STRIPE_PRICE_BUSINESS}
+      - SMTP_HOST=${SMTP_HOST}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  pdf_service:
+    build:
+      context: ./backend
+      dockerfile: pdf_service/Dockerfile
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-pdfuser}:${POSTGRES_PASSWORD:-pdfpass}@postgres:5432/${POSTGRES_DB:-pdfeditor}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redispass}@redis:6379/0
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-pdfuser}:${RABBITMQ_PASSWORD:-pdfpass}@rabbitmq:5672/
+      - S3_ENDPOINT=http://minio:9000
+      - S3_PUBLIC_ENDPOINT=${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+      - S3_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - S3_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin123}
+      - S3_BUCKET=${S3_BUCKET:-pdf-documents}
+      # Optional real AV: set CLAMAV_HOST=clamav and run `docker compose --profile av up -d`.
+      # Built-in signature scan (EICAR + executables) is always on regardless.
+      - CLAMAV_HOST=${CLAMAV_HOST:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ocr_service:
+    build:
+      context: ./backend
+      dockerfile: ocr_service/Dockerfile
+    ports:
+      - "8004:8004"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-pdfuser}:${POSTGRES_PASSWORD:-pdfpass}@postgres:5432/${POSTGRES_DB:-pdfeditor}
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-pdfuser}:${RABBITMQ_PASSWORD:-pdfpass}@rabbitmq:5672/
+      - S3_ENDPOINT=http://minio:9000
+      - S3_PUBLIC_ENDPOINT=${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+      - S3_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - S3_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin123}
+      - S3_BUCKET=${S3_BUCKET:-pdf-documents}
+      - CLAMAV_HOST=${CLAMAV_HOST:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  conversion_service:
+    build:
+      context: ./backend
+      dockerfile: conversion_service/Dockerfile
+    ports:
+      - "8005:8005"
+    environment:
+      - LIBRETRANSLATE_URL=${LIBRETRANSLATE_URL:-http://libretranslate:5000}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-pdfuser}:${POSTGRES_PASSWORD:-pdfpass}@postgres:5432/${POSTGRES_DB:-pdfeditor}
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-pdfuser}:${RABBITMQ_PASSWORD:-pdfpass}@rabbitmq:5672/
+      - S3_ENDPOINT=http://minio:9000
+      - S3_PUBLIC_ENDPOINT=${S3_PUBLIC_ENDPOINT:-http://localhost:9000}
+      - S3_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - S3_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin123}
+      - S3_BUCKET=${S3_BUCKET:-pdf-documents}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────
+  # Frontend
+  # ──────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8000
+      - NEXT_PUBLIC_STRIPE_PUBLIC_KEY=${STRIPE_PUBLIC_KEY}
+    depends_on:
+      - gateway
+    restart: unless-stopped
+
+  # ── Opt-in: TLS reverse proxy (profile: tls) — `docker compose --profile tls up -d` ──
+  # Caddy fronts the gateway + frontend with HTTPS. Locally it self-signs; with a real
+  # domain + ports 80/443 public it auto-provisions Let's Encrypt certs (set DOMAIN_*).
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    ports:
+      - "443:443"
+      - "8443:8443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - gateway
+      - frontend
+    restart: unless-stopped
+
+  # ── Opt-in: real antivirus (profile: av) — `docker compose --profile av up -d` ──
+  # Then set CLAMAV_HOST=clamav in .env and restart pdf_service + conversion_service.
+  clamav:
+    image: clamav/clamav:latest
+    profiles: ["av"]
+    ports:
+      - "3310:3310"
+    volumes:
+      - clamav_db:/var/lib/clamav
+    restart: unless-stopped
+
+  # ── Opt-in: monitoring (profile: monitoring) ──
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["monitoring"]
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["monitoring"]
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+    volumes:
+      - ./monitoring/grafana-datasource.yml:/etc/grafana/provisioning/datasources/ds.yml:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  lt_models:
+  clamav_db:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  minio_data:
+  caddy_data:
+  caddy_config:
+  grafana_data:

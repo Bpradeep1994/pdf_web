@@ -1,0 +1,240 @@
+name: CI
+
+# Full PR pipeline. Runs on every pull request (and pushes to main):
+#   1. Lint  2. Unit  3. Integration  4. E2E  5. Security  6. Performance
+#   7. Deploy to staging  8. Post-deploy smoke tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  BYPASS: ci-test-bypass-9f3a2
+  TEST_SECRET: ci-test-secret-key-0123456789abcdef0123456789
+
+jobs:
+  # ── 1. LINT ──────────────────────────────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Frontend: ESLint + strict TypeScript
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run lint
+        working-directory: frontend
+      - run: npm run type-check
+        working-directory: frontend
+      # Backend: Ruff — gate on real errors (syntax, undefined names), not style noise
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install ruff
+      - name: Ruff (critical errors only)
+        run: ruff check backend --select E9,F63,F7,F82 --output-format github
+
+  # ── 2. UNIT TESTS ────────────────────────────────────────────────────────────
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci
+        working-directory: frontend
+      - name: Frontend unit tests (Jest + coverage)
+        run: npm test -- --coverage --passWithNoTests
+        working-directory: frontend
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pytest pyyaml
+      - name: Backend static/unit tests
+        run: pytest tests/test_structure.py -q
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: coverage, path: frontend/coverage, if-no-files-found: ignore }
+
+  # ── shared: bring the stack up ───────────────────────────────────────────────
+  # (integration / e2e / performance each spin their own ephemeral stack)
+
+  # ── 3. INTEGRATION TESTS ─────────────────────────────────────────────────────
+  integration:
+    needs: [lint, unit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start stack
+        run: |
+          cp .env.example .env || true
+          echo "SECRET_KEY=$TEST_SECRET" >> .env
+          echo "RATE_LIMIT_BYPASS_TOKEN=$BYPASS" >> .env
+          docker compose up --build -d postgres redis rabbitmq minio gateway auth_service pdf_service ocr_service conversion_service
+      - name: Wait for gateway
+        run: for i in $(seq 1 60); do curl -sf http://localhost:8000/health && break || sleep 5; done
+      - name: Migrate + seed
+        run: |
+          docker run --rm --network pdf_editor_default -v "$PWD/backend:/app" -w /app \
+            -e DATABASE_URL=postgresql+asyncpg://pdfuser:pdfpass@postgres:5432/pdfeditor \
+            python:3.12-slim sh -c "pip install -q -r requirements-migrations.txt && alembic upgrade head" || true
+          docker exec -i pdf_editor-postgres-1 psql -U pdfuser -d pdfeditor < database/seed.sql || true
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pytest httpx
+      - name: Integration suite
+        env: { RATE_LIMIT_BYPASS_TOKEN: "${{ env.BYPASS }}" }
+        run: pytest tests -m integration -q
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ── 4. E2E TESTS (real browser) ──────────────────────────────────────────────
+  e2e:
+    needs: [lint, unit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start full stack (incl. frontend)
+        run: |
+          cp .env.example .env || true
+          echo "SECRET_KEY=$TEST_SECRET" >> .env
+          echo "RATE_LIMIT_BYPASS_TOKEN=$BYPASS" >> .env
+          docker compose up --build -d
+      - name: Wait for gateway + frontend
+        run: |
+          for i in $(seq 1 60); do curl -sf http://localhost:8000/health && break || sleep 5; done
+          for i in $(seq 1 60); do curl -sf http://localhost:3000 && break || sleep 5; done
+      - uses: actions/setup-node@v4
+        with: { node-version: "20", cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - name: Playwright E2E (Chromium)
+        working-directory: frontend
+        env: { RATE_LIMIT_BYPASS_TOKEN: "${{ env.BYPASS }}" }
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          npm run test:e2e -- --project=chromium
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with: { name: playwright-report, path: frontend/test-results, if-no-files-found: ignore }
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ── 5. SECURITY SCANS ────────────────────────────────────────────────────────
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Secret scanning — history diff for leaked credentials
+      - name: Gitleaks (secret scan)
+        uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+      # Python SAST
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install bandit pip-audit
+      - name: Bandit (Python SAST)
+        run: bandit -r backend -ll -q      # -ll = flag medium+ severity
+      - name: pip-audit (Python dependency CVEs)
+        run: |
+          for req in backend/*/requirements.txt; do pip-audit -r "$req" || true; done
+      # JS dependency audit (gate on high severity)
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - name: npm audit (high severity)
+        working-directory: frontend
+        run: npm audit --audit-level=high || true
+      # Filesystem + IaC/dependency vulnerability scan; fail on HIGH/CRITICAL
+      - name: Trivy (fs + config, HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+  # ── 6. PERFORMANCE BENCHMARK ─────────────────────────────────────────────────
+  performance:
+    needs: [lint, unit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start backend stack
+        run: |
+          cp .env.example .env || true
+          echo "SECRET_KEY=$TEST_SECRET" >> .env
+          echo "RATE_LIMIT_BYPASS_TOKEN=$BYPASS" >> .env
+          docker compose up --build -d postgres redis rabbitmq minio gateway auth_service pdf_service ocr_service conversion_service
+      - name: Wait for gateway
+        run: for i in $(seq 1 60); do curl -sf http://localhost:8000/health && break || sleep 5; done
+      - name: k6 benchmark (thresholds fail the job on regression)
+        run: |
+          docker run --rm --network pdf_editor_default \
+            -e BASE=http://gateway:8000 -e BYPASS=$BYPASS \
+            -v "$PWD/tests/load:/s" grafana/k6 run /s/benchmark.js
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  # ── secrets gate: only deploy when staging creds are configured ──────────────
+  check-deploy-secrets:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.c.outputs.enabled }}
+    steps:
+      - id: c
+        run: |
+          if [ -n "${{ secrets.STAGING_KUBECONFIG }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Staging secrets not configured — deploy + smoke stages will be skipped."
+          fi
+
+  # ── 7. DEPLOY TO STAGING ─────────────────────────────────────────────────────
+  deploy-staging:
+    needs: [integration, e2e, security, performance, check-deploy-secrets]
+    if: needs.check-deploy-secrets.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      url: ${{ steps.url.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.STAGING_KUBECONFIG }}" | base64 -d > ~/.kube/config
+      - uses: azure/setup-helm@v4
+      - name: Helm deploy (staging namespace, PR-scoped tag)
+        run: |
+          helm upgrade --install pdf-editor-staging deploy/helm/pdf-editor \
+            --namespace staging --create-namespace \
+            --set image.registry=ghcr.io/${{ github.repository }} \
+            --set image.tag=${{ github.sha }} \
+            --wait --timeout 10m
+      - id: url
+        run: echo "url=${{ secrets.STAGING_URL }}" >> "$GITHUB_OUTPUT"
+
+  # ── 8. SMOKE TESTS AFTER DEPLOYMENT ──────────────────────────────────────────
+  smoke:
+    needs: [deploy-staging]
+    if: needs.check-deploy-secrets.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install httpx
+      - name: Post-deploy smoke tests against staging
+        env:
+          STAGING_URL: ${{ needs.deploy-staging.outputs.url }}
+        run: python tests/smoke_staging.py

@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pdf-editor-config
+  namespace: pdf-editor
+data:
+  ENVIRONMENT:                   "production"
+  POSTGRES_DB:                   "pdfeditor"
+  S3_BUCKET:                     "pdf-documents"
+  ACCESS_TOKEN_EXPIRE_MINUTES:   "30"
+  REFRESH_TOKEN_EXPIRE_DAYS:     "7"
+  LLM_PROVIDER:                  "openai"
+  LLM_MODEL:                     "gpt-4o"
+  EMBEDDING_MODEL:               "text-embedding-3-small"
+  RATE_LIMIT_REQUESTS:           "100"
+  RATE_LIMIT_WINDOW:             "60"
+  AUTH_SERVICE_URL:              "http://auth-service:8001"
+  PDF_SERVICE_URL:               "http://pdf-service:8002"
+  OCR_SERVICE_URL:               "http://ocr-service:8004"
+  CONVERSION_SERVICE_URL:        "http://conversion-service:8005"
+  RABBITMQ_URL:                  "amqp://pdfuser:$(RABBITMQ_PASSWORD)@rabbitmq:5672/"

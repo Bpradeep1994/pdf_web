@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "pdf-editor.configName" . }}
+  labels: {{- include "pdf-editor.labels" . | nindent 4 }}
+data:
+  {{- range $k, $v := .Values.config }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+  # Internal service URLs (cluster DNS) the gateway proxies to.
+  AUTH_SERVICE_URL: "http://{{ .Release.Name }}-auth-service:8001"
+  PDF_SERVICE_URL: "http://{{ .Release.Name }}-pdf-service:8002"
+  OCR_SERVICE_URL: "http://{{ .Release.Name }}-ocr-service:8004"
+  CONVERSION_SERVICE_URL: "http://{{ .Release.Name }}-conversion-service:8005"

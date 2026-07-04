@@ -1,0 +1,28 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-migrate-{{ .Release.Revision }}
+  labels: {{- include "pdf-editor.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels: {{- include "pdf-editor.labels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.migrations.image | default (printf "%s/pdf_service:%s" .Values.image.registry .Values.image.tag) }}"
+          command: {{ toYaml .Values.migrations.command | nindent 12 }}
+          envFrom:
+            - configMapRef: { name: {{ include "pdf-editor.configName" . }} }
+            - secretRef: { name: {{ include "pdf-editor.secretName" . }} }
+{{- end }}

@@ -1,0 +1,5 @@
+# Dependencies for running Alembic migrations (used by the Helm migrate Job / CI).
+#   DATABASE_URL=postgresql+asyncpg://... alembic upgrade head
+alembic==1.13.2
+sqlalchemy[asyncio]==2.0.35
+asyncpg==0.29.0

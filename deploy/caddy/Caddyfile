@@ -1,0 +1,27 @@
+{
+	# For production with a real domain, Caddy auto-provisions Let's Encrypt certs.
+	email {$ACME_EMAIL}
+}
+
+# ── Local HTTPS (self-signed) — open https://localhost ──
+# Caddy issues a local CA cert automatically; the API + WebSocket go to the gateway,
+# everything else to the Next.js frontend.
+localhost {
+	@api path /api/* /ws/* /health /metrics
+	handle @api {
+		reverse_proxy gateway:8000
+	}
+	handle {
+		reverse_proxy frontend:3000
+	}
+}
+
+# ── Production: replace with your real hostnames (ports 80/443 must be public). ──
+# Caddy then provisions + renews Let's Encrypt TLS automatically. WebSockets pass through.
+#
+# api.example.com {
+# 	reverse_proxy gateway:8000
+# }
+# app.example.com {
+# 	reverse_proxy frontend:3000
+# }

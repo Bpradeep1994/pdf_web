@@ -1,0 +1,21 @@
+{{- $root := . -}}
+{{- range $svc, $cfg := .Values.services }}
+{{- $name := printf "%s-%s" $root.Release.Name ($svc | replace "_" "-") }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "pdf-editor.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ $root.Release.Name }}
+    app.kubernetes.io/component: {{ $svc }}
+  ports:
+    - port: {{ $cfg.port }}
+      targetPort: {{ $cfg.port }}
+      protocol: TCP
+{{- end }}

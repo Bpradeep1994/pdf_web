@@ -1,0 +1,18 @@
+# Production Caddy — auto-provisions & renews Let's Encrypt TLS for your domains.
+# Domains come from the environment (set DOMAIN_API / DOMAIN_APP / ACME_EMAIL in
+# .env.production). Ports 80 + 443 must be open to the internet.
+{
+	email {$ACME_EMAIL}
+}
+
+# API + WebSocket + health/metrics → gateway
+{$DOMAIN_API} {
+	reverse_proxy gateway:8000
+	encode gzip zstd
+}
+
+# Everything else → Next.js frontend
+{$DOMAIN_APP} {
+	reverse_proxy frontend:3000
+	encode gzip zstd
+}

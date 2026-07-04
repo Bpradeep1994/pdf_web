@@ -1,0 +1,83 @@
+# Production override — apply on top of docker-compose.yml:
+#   docker compose --env-file .env.production \
+#     -f docker-compose.yml -f docker-compose.prod.yml \
+#     --profile tls --profile av up -d --build
+#
+# What this changes vs. the dev stack:
+#   • Infra (Postgres/Redis/RabbitMQ/MinIO) bound to 127.0.0.1 only — NOT internet-reachable.
+#   • Gateway/frontend have NO host ports — only Caddy (443/80) faces the internet.
+#   • restart: always, memory limits, ENVIRONMENT=production.
+#   • Caddy uses the domain-driven Caddyfile.prod and provisions real TLS.
+# `!override` replaces the base port list (needs Docker Compose ≥ 2.24 — you have it).
+
+services:
+  postgres:
+    ports: !override ["127.0.0.1:5432:5432"]
+    restart: always
+    mem_limit: 2g
+
+  redis:
+    ports: !override ["127.0.0.1:6379:6379"]
+    restart: always
+    mem_limit: 512m
+
+  rabbitmq:
+    ports: !override ["127.0.0.1:5672:5672"]
+    restart: always
+    mem_limit: 512m
+
+  minio:
+    ports: !override ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+    restart: always
+    mem_limit: 1g
+
+  libretranslate:
+    ports: !override []
+    restart: always
+    mem_limit: 2g
+
+  gateway:
+    ports: !override []          # reached only via Caddy
+    restart: always
+    environment:
+      - ENVIRONMENT=production
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-600}
+    mem_limit: 512m
+
+  auth_service:
+    ports: !override []
+    restart: always
+    mem_limit: 512m
+
+  pdf_service:
+    ports: !override []
+    restart: always
+    mem_limit: 1g
+
+  ocr_service:
+    ports: !override []
+    restart: always
+    mem_limit: 1g
+
+  conversion_service:
+    ports: !override []
+    restart: always
+    mem_limit: 1500m
+
+  frontend:
+    ports: !override []          # reached only via Caddy
+    restart: always
+    mem_limit: 512m
+
+  caddy:
+    # override the dev Caddyfile with the production (domain-driven) one + open port 80
+    volumes: !override
+      - ./deploy/caddy/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports: !override ["80:80", "443:443"]
+    environment:
+      - ACME_EMAIL=${ACME_EMAIL}
+      - DOMAIN_API=${DOMAIN_API}
+      - DOMAIN_APP=${DOMAIN_APP}
+    restart: always

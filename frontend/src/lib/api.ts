@@ -169,6 +169,12 @@ export const billingApi = {
   resume:       () => api.post("/billing/resume"),
   refund:       (payment_id: string, reason?: string) => api.post("/billing/refund", { payment_id, reason }),
   providers:    () => api.get("/billing/providers"),
+  razorpayOrder:  (plan: string, interval = "monthly") =>
+    api.post("/billing/razorpay/order", { plan, interval }),
+  razorpayVerify: (body: {
+    plan: string; interval?: string;
+    razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string;
+  }) => api.post("/billing/razorpay/verify", body),
   paymentMethods: () => api.get("/billing/payment-methods"),
   payments:     () => api.get("/billing/payments"),
   portal:       () => api.post("/billing/portal"),

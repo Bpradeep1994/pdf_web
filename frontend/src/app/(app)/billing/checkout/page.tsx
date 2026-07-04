@@ -1,5 +1,5 @@
 "use client";
-import { useState, Suspense } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Lock, Loader2, ArrowLeft, CreditCard, Smartphone, Building2, Wallet, CheckCircle2, ShieldCheck } from "lucide-react";
@@ -60,6 +60,54 @@ function CheckoutInner() {
   const [otp, setOtp]     = useState("");
   const [sentTo, setSentTo] = useState("");
   const [busy, setBusy]   = useState(false);
+  const [razorpayEnabled, setRazorpayEnabled] = useState(false);
+
+  // Is real Razorpay live? If so, "Pay" opens the Razorpay widget instead of the demo flow.
+  useEffect(() => {
+    billingApi.providers()
+      .then(({ data }) => setRazorpayEnabled(!!data.razorpay_enabled))
+      .catch(() => {});
+  }, []);
+
+  const loadRazorpayScript = () => new Promise<boolean>((resolve) => {
+    if ((window as any).Razorpay) return resolve(true);
+    const s = document.createElement("script");
+    s.src = "https://checkout.razorpay.com/v1/checkout.js";
+    s.onload = () => resolve(true); s.onerror = () => resolve(false);
+    document.body.appendChild(s);
+  });
+
+  // Real payment: create an order server-side, open Razorpay Checkout, verify on success.
+  const payWithRazorpay = async () => {
+    setBusy(true);
+    try {
+      if (!(await loadRazorpayScript())) { toast.error("Could not load the payment gateway"); return; }
+      const { data: order } = await billingApi.razorpayOrder(plan, interval);
+      const rzp = new (window as any).Razorpay({
+        key: order.key_id, amount: order.amount, currency: order.currency,
+        name: "PDF Editor", description: `${order.plan_name} · ${interval}`,
+        order_id: order.order_id, prefill: { email: order.email }, theme: { color: "#2563eb" },
+        handler: async (resp: any) => {
+          try {
+            await billingApi.razorpayVerify({
+              plan, interval,
+              razorpay_order_id: resp.razorpay_order_id,
+              razorpay_payment_id: resp.razorpay_payment_id,
+              razorpay_signature: resp.razorpay_signature,
+            });
+            setStep("done");
+            setTimeout(() => router.push("/billing?status=success"), 2000);
+          } catch (e: any) {
+            toast.error(e?.response?.data?.detail ?? "Payment verification failed");
+          }
+        },
+      });
+      rzp.on("payment.failed", () => toast.error("Payment failed — please try again"));
+      rzp.open();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail ?? "Could not start the payment");
+    } finally { setBusy(false); }
+  };
 
   const methods = METHODS[provider] ?? METHODS.stripe;
   const isCard = method === "card";
@@ -71,8 +119,9 @@ function CheckoutInner() {
   const pickProvider = (p: string) => { setProvider(p); setMethod((METHODS[p] ?? METHODS.stripe)[0].id); };
   const onCard = (v: string) => { setCard(groups(v)); const d = detectBrand(v); if (d) setBrand(d); };
 
-  // Step 1 → server generates + sends the OTP (email + optional SMS)
+  // Step 1 → real Razorpay when configured; otherwise the demo OTP flow.
   const startPayment = async () => {
+    if (razorpayEnabled) { return payWithRazorpay(); }
     if (isCard) {
       if (card.replace(/\D/g, "").length < 12) { toast.error("Enter a valid card number"); return; }
       const m = /^(\d{2})\s*\/?\s*(\d{2})$/.exec(exp.trim());
@@ -117,7 +166,9 @@ function CheckoutInner() {
         <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
           <div className="flex items-center justify-between mb-1">
             <h1 className="text-xl font-semibold text-slate-900">Checkout</h1>
-            <span className="text-xs text-amber-600 bg-amber-50 px-2 py-1 rounded-full">Demo mode</span>
+            {razorpayEnabled
+              ? <span className="text-xs text-green-700 bg-green-50 px-2 py-1 rounded-full">Secure · Razorpay</span>
+              : <span className="text-xs text-amber-600 bg-amber-50 px-2 py-1 rounded-full">Demo mode</span>}
           </div>
           <p className="text-slate-500 text-sm mb-5">
             <span className="capitalize font-medium text-slate-700">{plan}</span> · <span className="capitalize">{interval}</span> · <span className="font-semibold">${amount}</span>{suffix}
@@ -264,7 +315,8 @@ function CheckoutInner() {
 
           {step !== "done" && (
             <p className="flex items-center justify-center gap-1.5 text-xs text-slate-500 mt-4">
-              <Lock className="w-3.5 h-3.5" /> Demo checkout — no real charge.
+              <Lock className="w-3.5 h-3.5" />
+              {razorpayEnabled ? "Payments secured by Razorpay." : "Demo checkout — no real charge."}
             </p>
           )}
         </div>

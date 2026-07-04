@@ -34,6 +34,24 @@ RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 PAYPAL_WEBHOOK_ID       = os.getenv("PAYPAL_WEBHOOK_ID", "")
 APP_URL               = os.getenv("NEXT_PUBLIC_APP_URL", "http://localhost:3000")
 
+# ── Razorpay (India — settles to an Indian bank account) ──────────────────────
+RAZORPAY_KEY_ID     = os.getenv("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_ENABLED    = bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and "..." not in RAZORPAY_KEY_ID)
+RAZORPAY_CURRENCY   = os.getenv("RAZORPAY_CURRENCY", "INR")
+# Monthly prices in the smallest currency unit (paise for INR). Set real prices via env.
+RAZORPAY_PRICES = {
+    "pro":      int(os.getenv("RAZORPAY_PRICE_PRO",      "29900")),   # ₹299 / month
+    "business": int(os.getenv("RAZORPAY_PRICE_BUSINESS", "99900")),   # ₹999 / month
+}
+
+
+def _razorpay_amount(plan: str, interval: str) -> int:
+    base = RAZORPAY_PRICES.get(plan, 0)
+    if interval == "yearly":   return base * 10     # 2 months free
+    if interval == "lifetime": return base * 30
+    return base
+
 
 def _looks_real_key(k: str) -> bool:
     # Reject placeholders like "sk_test_..." — only a plausibly real key counts.
@@ -393,7 +411,12 @@ async def refund_payment(body: RefundRequest, request: Request,
 async def list_providers():
     return {"providers": PROVIDERS, "live": BILLING_ENABLED,
             "methods": ["card", "upi", "netbanking", "wallet", "paypal"],
-            "cards": ["visa", "mastercard", "amex", "discover", "jcb", "diners"]}
+            "cards": ["visa", "mastercard", "amex", "discover", "jcb", "diners"],
+            # Razorpay live-checkout config for the frontend widget (key_id is public).
+            "razorpay_enabled": RAZORPAY_ENABLED,
+            "razorpay_key_id":  RAZORPAY_KEY_ID if RAZORPAY_ENABLED else "",
+            "razorpay_currency": RAZORPAY_CURRENCY,
+            "razorpay_prices": {k: _razorpay_amount(k, "monthly") for k in RAZORPAY_PRICES}}
 
 
 @billing_router.get("/payment-methods")
@@ -483,6 +506,80 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
              "st": status, "c": obj.get("customer")})
 
     return {"received": True}
+
+
+# ── Razorpay live checkout (order → pay → verify) ─────────────────────────────
+# Flow: frontend asks the backend to create an Order → opens Razorpay Checkout with
+# it → user pays (card/UPI/netbanking) → Razorpay returns payment_id + signature →
+# backend verifies the signature and activates the plan. The money lands in your
+# Razorpay account and settles to your linked Indian bank account on Razorpay's
+# payout schedule. The /webhook/razorpay handler below is the server-to-server
+# backup confirmation.
+
+import hashlib as _hashlib
+import hmac as _hmac
+import httpx as _httpx
+
+
+class RazorpayOrderRequest(BaseModel):
+    plan:     str
+    interval: str = "monthly"
+
+
+@billing_router.post("/razorpay/order")
+async def razorpay_create_order(body: RazorpayOrderRequest,
+                                current_user: User = Depends(_get_current_user)):
+    if not RAZORPAY_ENABLED:
+        raise HTTPException(status_code=503, detail="Razorpay is not configured")
+    if body.plan not in RAZORPAY_PRICES:
+        raise HTTPException(status_code=400, detail="That plan is not purchasable")
+    amount = _razorpay_amount(body.plan, body.interval)
+    try:
+        async with _httpx.AsyncClient(timeout=20) as client:
+            r = await client.post(
+                "https://api.razorpay.com/v1/orders",
+                auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET),
+                json={"amount": amount, "currency": RAZORPAY_CURRENCY, "receipt": f"u_{current_user.id}",
+                      "notes": {"user_id": str(current_user.id), "plan": body.plan, "interval": body.interval}},
+            )
+        r.raise_for_status()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Could not create payment order")
+    order = r.json()
+    return {
+        "order_id": order["id"], "amount": amount, "currency": RAZORPAY_CURRENCY,
+        "key_id": RAZORPAY_KEY_ID, "plan_name": PLANS.get(body.plan, {}).get("name", body.plan),
+        "email": current_user.email,
+    }
+
+
+class RazorpayVerifyRequest(CheckoutRequest):
+    razorpay_order_id:   str
+    razorpay_payment_id: str
+    razorpay_signature:  str
+
+
+@billing_router.post("/razorpay/verify")
+async def razorpay_verify(body: RazorpayVerifyRequest, request: Request,
+                          current_user: User = Depends(_get_current_user),
+                          db: AsyncSession = Depends(get_db)):
+    """Verify the payment signature Razorpay returns to the browser, then activate the plan."""
+    if not RAZORPAY_ENABLED:
+        raise HTTPException(status_code=503, detail="Razorpay is not configured")
+    expected = _hmac.new(
+        RAZORPAY_KEY_SECRET.encode(),
+        f"{body.razorpay_order_id}|{body.razorpay_payment_id}".encode(),
+        _hashlib.sha256,
+    ).hexdigest()
+    if not _hmac.compare_digest(expected, body.razorpay_signature or ""):
+        await _pay_event(db, current_user.id, "payment.failed", provider="razorpay",
+                         data={"reason": "bad_signature", "order": body.razorpay_order_id})
+        await db.commit()
+        raise HTTPException(status_code=400, detail="Payment verification failed")
+    body.provider = "razorpay"
+    result = await _activate(db, current_user, body, request)
+    await db.commit()
+    return result
 
 
 # ── Other providers ───────────────────────────────────────────────────────────

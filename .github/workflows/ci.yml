@@ -58,7 +58,7 @@ jobs:
         working-directory: frontend
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install pytest pyyaml
+      - run: pip install pytest pyyaml httpx   # httpx: tests/conftest.py imports it
       - name: Backend static/unit tests
         run: pytest tests/test_structure.py -q
       - uses: actions/upload-artifact@v4
@@ -142,6 +142,7 @@ jobs:
   # hard gate (remove the `|| true` / set Trivy exit-code:"1") once you triage findings.
   security:
     runs-on: ubuntu-latest
+    continue-on-error: true      # report-only: never fails the overall run
     steps:
       - uses: actions/checkout@v4
       - name: Gitleaks (secret scan)

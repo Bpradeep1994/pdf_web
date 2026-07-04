@@ -102,9 +102,14 @@ in the repo settings to turn it on.
 
 ## Deployment
 
-See **[docs/GO_LIVE.md](docs/GO_LIVE.md)** for a step-by-step production runbook (VPS + Caddy
-TLS, or the Helm chart in `deploy/helm/`), and **[.env.production.example](.env.production.example)**
-for the required configuration.
+Follow the **[Launch Runbook → docs/LAUNCH.md](docs/LAUNCH.md)** — a single top-to-bottom
+checklist that ties together deployment, payments, and the global edge. Supporting docs:
+[GO_LIVE.md](docs/GO_LIVE.md) (VPS/Helm deploy), [PAYMENTS.md](docs/PAYMENTS.md) (Razorpay),
+[CLOUDFLARE.md](docs/CLOUDFLARE.md) (global TLS/CDN). Deploy is one command once configured:
+
+```bash
+./deploy/deploy.sh
+```
 
 ## Project status & known limitations
 
